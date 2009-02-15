@@ -83,6 +83,8 @@ else:
                         import traceback
                         traceback.print_exc()
                         os._exit(1)
+                    print("os.execv returned ??!") #shouldn't be possible
+                    os._exit(1)
                 else:
                     self._pid = pid
             else:
