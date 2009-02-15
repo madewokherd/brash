@@ -39,57 +39,73 @@ class CommandBlock(object):
     def wait(self):
         raise NotImplemented
 
-class ArgBlock(CommandBlock):
-    __slots__ = ['_pid', '_result', '_args']
+if _windows:
+    pass
+else:
+    class ArgBlock(CommandBlock):
+        __slots__ = ['_pid', '_result', '_args']
 
-    def __init__(self, args):
-        self._args = args
+        def __init__(self, args):
+            self._args = args
 
-    def _parse_and_eval_args(self):
-        args = []
-        arg = []
-        for char in self._args:
-            if char.isspace():
-                if arg:
-                    args.append(''.join(arg))
-                    arg = []
+        def _parse_and_eval_args(self):
+            args = []
+            arg = []
+            for char in self._args:
+                if char.isspace():
+                    if arg:
+                        args.append(''.join(arg))
+                        arg = []
+                else:
+                    arg.append(char)
+            if arg:
+                args.append(''.join(arg))
+            return args
+
+        def spawn(self, shell, stdin, stdout, stderr):
+            args = self._parse_and_eval_args()
+            try:
+                self._pid
+            except AttributeError:
+                pid = os.fork()
+                if pid == 0:
+                    # child process
+                    #FIXME: use PATH and environment from the shell
+                    #FIXME: use working dir from the shell
+                    #FIXME: use stdin, stdout, and stderr
+                    #FIXME: close any other open fd's
+                    try:
+                        os.execv(args[0], args)
+                    except OSError, e:
+                        print("%s: %s" % (args[0], e.strerror))
+                        os._exit(e.errno)
+                    except:
+                        import traceback
+                        traceback.print_exc()
+                        os._exit(1)
+                else:
+                    self._pid = pid
             else:
-                arg.append(char)
-        if arg:
-            args.append(''.join(arg))
-        return args
+                raise error("spawn() has already been called")
 
-    def spawn(self, shell, stdin, stdout, stderr):
-        args = self._parse_and_eval_args()
-        try:
-            self._pid
-        except AttributeError:
-            #FIXME: use PATH and environment from the shell
-            #FIXME: use working dir from the shell
-            #FIXME: use stdin, stdout, and stderr
-            self._pid = os.spawnv(os.P_NOWAIT, args[0], args)
-        else:
-            raise error("spawn() has already been called")
+        def poll(self):
+            try:
+                return self._result
+            except AttributeError:
+                pid, exitcode = os.waitpid(self._pid, os.WNOHANG)
+                if pid:
+                    self._result = exitcode
+                    return exitcode
+                else:
+                    return None
 
-    def poll(self):
-        try:
-            return self._result
-        except AttributeError:
-            #FIXME: This will block on Windows
-            pid, exitcode = os.waitpid(self._pid, os.WNOHANG)
-            if pid:
+        def wait(self):
+            try:
+                return self._result
+            except AttributeError:
+                pid, exitcode = os.waitpid(self._pid, 0)
                 self._result = exitcode
                 return exitcode
-            else:
-                return None
-
-    def wait(self):
-        try:
-            return self._result
-        except AttributeError:
-            pid, exitcode = os.waitpid(self._pid, 0)
-            self._result = exitcode
-            return exitcode
 
 class Shell(object):
     def read_input(self):
