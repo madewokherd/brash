@@ -40,7 +40,81 @@ class CommandBlock(object):
         raise NotImplemented
 
 if _windows:
-    pass
+    class ArgBlock(CommandBlock):
+        __slots__ = ['_hprocess', '_result', '_args']
+
+        def __init__(self, args):
+            self._args = args
+        
+        def _parse_and_eval_args(self):
+            #this has to go
+            args = []
+            arg = []
+            for char in self._args:
+                if char.isspace():
+                    if arg:
+                        args.append(''.join(arg))
+                        arg = []
+                else:
+                    arg.append(char)
+            if arg:
+                args.append(''.join(arg))
+            return args
+
+        def spawn(self, shell, stdin, stdout, stderr):
+            args = self._parse_and_eval_args()
+            try:
+                self._hprocess
+            except AttributeError:
+                import ctypes, process, subprocess
+                cmdline = subprocess.list2cmdline(args)
+                si = process.STARTUPINFO()
+                pi = process.PROCESS_INFORMATION()
+                try:
+                    process.CreateProcess(
+                        None, #application name
+                        cmdline, #command line
+                        None, #process attributes
+                        None, #thread attributes
+                        False, #inherit handles
+                        process.CREATE_NEW_PROCESS_GROUP, #flags
+                        None, #environment
+                        None, #current directory
+                        ctypes.byref(si), #startupinfo
+                        ctypes.byref(pi), #processinfo
+                        )
+                except WindowsError, e:
+                    import traceback
+                    traceback.print_exc()
+                    self._hprocess = None
+                    self._result = WindowsError.errno
+                else:
+                    self._hprocess = pi.hProcess
+                    ctypes.windll.kernel32.CloseHandle(pi.hThread)
+            else:
+                raise error("spawn() has already been called")
+
+        def poll(self):
+            try:
+                return self._result
+            except AttributeError:
+                import ctypes, process
+                if 0 == ctypes.windll.kernel32.WaitForSingleObject(self._hprocess, 0):
+                    self._result = process.GetExitCodeProcess(self._hprocess)
+                    ctypes.windll.kernel32.CloseHandle(self._hprocess)
+                    return self._result
+                else:
+                    return None
+
+        def wait(self):
+            try:
+                return self._result
+            except AttributeError:
+                import ctypes, process
+                ctypes.windll.kernel32.WaitForSingleObject(self._hprocess, -1)
+                self._result = process.GetExitCodeProcess(self._hprocess)
+                ctypes.windll.kernel32.CloseHandle(self._hprocess)
+                return self._result
 else:
     class ArgBlock(CommandBlock):
         __slots__ = ['_pid', '_result', '_args']
