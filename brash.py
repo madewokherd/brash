@@ -342,7 +342,7 @@ class InteractiveShell(Shell):
     def read_input(self):
         # TODO: This will need to be written based on curses or something, and we'll need a better prompt
         try:
-            return raw_input("$ ")
+            return raw_input("%s> " % self.curdir)
         except EOFError:
             return None
 
