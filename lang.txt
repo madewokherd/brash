@@ -1,0 +1,217 @@
+Right, so my eventual goal is to create a new somewhat-sh-like shell with a python-like syntax that runs on Windows.
+
+
+The following are special:
+
+if <statement>:
+    <commands>
+elif <statement>:
+    <commands>
+else:
+    <commands>
+
+while <statement>:
+    <commands>
+    continue
+    break
+else:
+    <commands>
+
+func <name>:
+    <commands>
+
+with <statement>:
+    <commands>
+err:
+    <commands>
+(makes it possible to pipe stdout to one thing and stderr to another)
+
+for <name> in <expressions>:
+    <commands>
+    continue
+    break
+else:
+    <commands>
+
+spawn <statement>
+
+exec <statement>
+
+
+
+The tab key inserts a literal tab at the start of the line. Shift_tab removes it.
+
+If a commands spans multiple lines, the multiple lines are not separated in the history.
+
+When pressing down, if you can't go further down in the history, a new history entry is created.
+
+Changes to the history persist unless you press ctrl+c while the changed line is selected.
+
+
+
+` escapes the next character
+
+` followed by a newline continues the current line
+
+'single quotes' cause everything inside to be taken literally
+
+
+
+|| and &&
+
+
+
+Commands are normally separated by newlines.
+
+; separates commands on a single line
+
+| to make a pipe, 2| to pipe stderr only, &| to pipe both
+
+
+
+A "statement" is simply a series of expressions, each separated by a space. Each "expression" returns a sequence of arguments. Usually, this sequence consists of a single string that is the expression. Expressions are evaluated left to right, and the results are joined into a single series of arguments.
+
+
+
+(commands) groups the enclosed commands into a single statement and runs them in a subshell.
+
+
+
+Things of the form NAME=expression at the start of a statement are taken as instructions to set an environment variable to the value of the expression for the duration of the statement.
+
+
+
+Bracketed expressions:
+
+$[expressions] evaluates the expressions inside; the only effect it really has is grouping
+
+$((expressions)) evaluates what's inside and then does math
+
+${name} gets the value of an environment variable
+
+$(command) is for command substitution
+The result is split by newlines only; a single line becomes a single argument.
+
+$$ is replaced by a literal $
+
+If one of these is open and a newline is encountered, it continues on the next line.
+
+Bracketed expressions do not need to be separated from other expressions by a space on either side. If a space is missing, two arguments will be joined in the final argument list.
+
+
+
+"double quotes" group expressions much like $[] does, but the result is always a single argument, with multiple arguments joined by spaces if necessary. They do not signal that the current expression continues on the next line.
+
+
+
+Non-bracketed expressions:
+
+$0 - first argument, which happens to be the command name
+
+$N - the Nth argument, starting at 0
+
+$N-M - arguments N through M inclusive (kept separate)
+
+$N-  - argument N and everything following it (kept separate)
+
+$argv - equivalent to $0-
+
+$argc - number of arguments in argv
+
+$result - return value of last-completed command
+
+$pid - the shell's process id
+
+$user - the current username
+
+$uid - the current user id
+
+$home - the current user's home directory
+
+$nul - the filename of the null device
+
+$pwd - the present working directory
+
+Local variables override any special meanings here.
+
+These do not need a space on the left, but they do need one on the right.
+
+
+
+If an expression is ~ or starts with ~/ or ~\, the ~ is replaced by $home.
+
+If an expression starts with ~, followed by a userid, followed by / or \, the ~ and username are replaced by the user's home directory.
+
+
+
+* and ? do wildcard expansion
+
+
+
+# for line comments
+
+
+
+> file
+2> file
+&> file
+
+>> file
+2>> file
+&>> file
+
+Redirection to $nul will always work, even on windows.
+
+
+
+<< eof
+lines where everything is taken literally except $, which has its normal meaning; the resulting arguments are joined by spaces
+eof
+
+
+
+variables:
+
+Normally, you do something like this:
+
+set variable value
+
+which will literally set the variable named 'variable' to value.
+
+
+Note that variables contain sequences, not a single argument. So
+
+set var echo Hello thar!
+
+followed by
+
+$var
+
+will print out "Hello thar!".
+
+
+However,
+
+set var "echo Hello thar!"
+
+followed by
+
+$var
+
+will simply print out an error because "echo Hello thar!" is not a valid executable, function, or built-in command.
+
+
+export works similarly but (of course) makes the variable part of the environment and automatically joins additional arguments with spaces.
+
+
+An = can optionally be used to separate variable from value.
+
+
+
+Subshells:
+
+These are used for commands enclosed in parenthesis and for user-defined functions. A subshell has independent functions, local variables, environment variables, and working directory, cloned from the parent. Its standard in, out, and err streams will generally be pipes connecting it to the parent. Subshells are NOT new processes, and the shell will NOT fork to create them.
+
+
+
+Standard unix commands should be replaced on Windows
