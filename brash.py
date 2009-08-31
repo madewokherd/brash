@@ -67,27 +67,19 @@ builtin_commands = {
     'cd': command_cd,
     }
 
+def expr_pwd(shell):
+    return [shell.curdir]
+
+builtin_exprs = {
+    'pwd': expr_pwd,
+    }
+
 if _windows:
     class ArgBlock(CommandBlock):
         __slots__ = ['_hprocess', '_result', '_args']
 
         def __init__(self, args):
             self._args = args
-        
-        def _parse_and_eval_args(self):
-            #this has to go
-            args = []
-            arg = []
-            for char in self._args:
-                if char.isspace():
-                    if arg:
-                        args.append(''.join(arg))
-                        arg = []
-                else:
-                    arg.append(char)
-            if arg:
-                args.append(''.join(arg))
-            return args
 
         def spawn(self, shell, stdin, stdout, stderr):
             args = self._parse_and_eval_args()
@@ -182,20 +174,6 @@ else:
         def __init__(self, args):
             self._args = args
 
-        def _parse_and_eval_args(self):
-            args = []
-            arg = []
-            for char in self._args:
-                if char.isspace():
-                    if arg:
-                        args.append(''.join(arg))
-                        arg = []
-                else:
-                    arg.append(char)
-            if arg:
-                args.append(''.join(arg))
-            return args
-
         def thread_func(self, command_func, args, shell, stdin, stdout, stderr):
             try:
                 self._result = command_func(args, shell, stdin, stdout, stderr)
@@ -206,7 +184,7 @@ else:
             self._lock.release()
 
         def spawn(self, shell, stdin, stdout, stderr):
-            args = self._parse_and_eval_args()
+            args = shell._parse_and_eval_args(self._args)
             try:
                 self._pid
             except AttributeError:
@@ -291,6 +269,60 @@ class Shell(object):
             environ = EnvironDictionary(os.environ)
         self.curdir = curdir
         self.environ = environ
+
+    def _parse_and_eval_args(self, string):
+        # this has to go
+        args = []
+        arg = []
+        i = iter(string)
+        while True:
+            try:
+                char = i.next()
+            except StopIteration:
+                break
+            if char.isspace():
+                if arg:
+                    args.append(''.join(arg))
+                    arg = []
+            elif char == '$':
+                try:
+                    nextchar = i.next()
+                except StopIteration:
+                    raise SyntaxError("unexpected end of line")
+                if nextchar == '$':
+                    arg.append('$')
+                elif nextchar.isspace():
+                    raise SyntaxError("unexpected whitespace")
+                else:
+                    expr = [nextchar]
+                    while True:
+                        try:
+                            nextchar = i.next()
+                        except StopIteration:
+                            break
+                        if nextchar.isspace():
+                            break
+                        expr.append(nextchar)
+                    expr = ''.join(expr)
+                    try:
+                        expr_func = builtin_exprs[expr]
+                    except KeyError:
+                        result = []
+                    else:
+                        result = expr_func(self)
+                    if result:
+                        args.append('%s%s' % (''.join(arg), result[0]))
+                        args.extend(result[1:])
+                        arg = []
+                    elif arg:
+                        # because we consumed a space earlier, we still have to clear arg
+                        args.append(''.join(arg))
+                        arg = []
+            else:
+                arg.append(char)
+        if arg:
+            args.append(''.join(arg))
+        return args
 
     def read_input(self):
         return None
