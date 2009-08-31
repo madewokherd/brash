@@ -23,6 +23,11 @@
 
 import os
 import sys
+import stat
+try:
+    import thread
+except ImportError:
+    import _thread
 
 _windows = sys.platform == 'win32'
 
@@ -38,6 +43,29 @@ class CommandBlock(object):
 
     def wait(self):
         raise NotImplemented
+
+def command_cd(args, shell, stdin, stdout, stderr):
+    if len(args) > 1:
+        newpath = os.path.normpath(os.path.join(shell.curdir, args[1]))
+        try:
+            st = os.stat(newpath)
+        except OSError, e:
+            print('cd: %s\n' % e.strerror)
+            return e.errno
+        else:
+            if stat.S_ISDIR(st.st_mode):
+                shell.curdir = newpath
+                return 0
+            else:
+                print('cd: %s' % 'Not a directory\n')
+                return 1
+    else:
+        print('cd without arguments not implemented yet\n')
+        return 1
+
+builtin_commands = {
+    'cd': command_cd,
+    }
 
 if _windows:
     class ArgBlock(CommandBlock):
@@ -149,7 +177,7 @@ if _windows:
             return self.values.itervalues()
 else:
     class ArgBlock(CommandBlock):
-        __slots__ = ['_pid', '_result', '_args']
+        __slots__ = ['_pid', '_result', '_args', '_lock']
 
         def __init__(self, args):
             self._args = args
@@ -168,16 +196,34 @@ else:
                 args.append(''.join(arg))
             return args
 
+        def thread_func(self, command_func, args, shell, stdin, stdout, stderr):
+            try:
+                self._result = command_func(args, shell, stdin, stdout, stderr)
+            except:
+                import traceback
+                print('An internal error occurred:\n%s' % traceback.print_exc())
+                self._result = 31335
+            self._lock.release()
+
         def spawn(self, shell, stdin, stdout, stderr):
             args = self._parse_and_eval_args()
             try:
                 self._pid
             except AttributeError:
+                try: # is this a builtin?
+                    command_func = builtin_commands[args[0]]
+                except KeyError: #nope
+                    pass
+                else: #yep
+                    self._pid = None
+                    self._lock = thread.allocate_lock()
+                    self._lock.acquire()
+                    #FIXME: get stdin, stdout, and stderr from the shell if necessary
+                    thread.start_new_thread(self.thread_func, (command_func, args, shell, stdin, stdout, stderr))
+                    return
                 pid = os.fork()
                 if pid == 0:
                     # child process
-                    #FIXME: use PATH and environment from the shell
-                    #FIXME: use working dir from the shell
                     #FIXME: use stdin, stdout, and stderr
                     #FIXME: close any other open fd's
                     os.chdir(shell.curdir)
@@ -214,20 +260,26 @@ else:
             try:
                 return self._result
             except AttributeError:
-                pid, exitcode = os.waitpid(self._pid, os.WNOHANG)
-                if pid:
-                    self._result = exitcode
-                    return exitcode
-                else:
-                    return None
+                if self._pid:
+                    pid, exitcode = os.waitpid(self._pid, os.WNOHANG)
+                    if pid:
+                        self._result = exitcode
+                        return exitcode
+                    else:
+                        return None
 
         def wait(self):
             try:
                 return self._result
             except AttributeError:
-                pid, exitcode = os.waitpid(self._pid, 0)
-                self._result = exitcode
-                return exitcode
+                if self._pid:
+                    pid, exitcode = os.waitpid(self._pid, 0)
+                    self._result = exitcode
+                    return exitcode
+                else:
+                    self._lock.acquire()
+                    self._lock.release()
+                    return self._result
 
     EnvironDictionary = dict
 
