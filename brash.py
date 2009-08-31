@@ -60,8 +60,12 @@ def command_cd(args, shell, stdin, stdout, stderr):
         return e.errno
     else:
         if stat.S_ISDIR(st.st_mode):
-            shell.curdir = newpath
-            return 0
+            try:
+                shell.chdir(newpath)
+                return 0
+            except OSError, e:
+                print('cd: %s\n' % e.strerror)
+                return e.errno
         else:
             print('cd: %s' % 'Not a directory\n')
             return 1
@@ -277,6 +281,9 @@ class Shell(object):
         self.curdir = curdir
         self.environ = environ
 
+    def chdir(self, dirname):
+        self.curdir = dirname
+
     def _parse_and_eval_args(self, string):
         # this has to go
         args = []
@@ -353,6 +360,10 @@ class InteractiveShell(Shell):
         except EOFError:
             return None
 
+    def chdir(self, dirname):
+        os.chdir(dirname)
+        Shell.chdir(self, dirname)
+
     def __init__(self, *args, **kwargs):
         Shell.__init__(self, *args, **kwargs)
         self.stdin = sys.stdin
@@ -362,10 +373,6 @@ class InteractiveShell(Shell):
 def main():
     curdir = os.getcwd()
     environ = EnvironDictionary(os.environ)
-    if not _windows:
-        #Since a shell's working directory isn't the process's working directory,
-        # we shouldn't keep it open as the current directory
-        os.chdir('/')
     shell = InteractiveShell(curdir, environ)
     shell.run()
     print ''
