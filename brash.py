@@ -196,6 +196,10 @@ else:
 
         def spawn(self, shell, stdin, stdout, stderr):
             args = shell._parse_and_eval_args(self._args)
+            if not args:
+                self._pid = None
+                self._result = 0
+                return
             try:
                 self._pid
             except AttributeError:
