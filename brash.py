@@ -34,6 +34,10 @@ _windows = sys.platform == 'win32'
 class error(Exception):
     pass
 
+def expanduser(string, shell):
+    # FIXME: os.path uses the current environment, not that of the shell
+    return os.path.expanduser(string)
+
 class CommandBlock(object):
     def spawn(self, shell, stdin, stdout, stderr):
         raise NotImplemented
@@ -47,21 +51,20 @@ class CommandBlock(object):
 def command_cd(args, shell, stdin, stdout, stderr):
     if len(args) > 1:
         newpath = os.path.normpath(os.path.join(shell.curdir, args[1]))
-        try:
-            st = os.stat(newpath)
-        except OSError, e:
-            print('cd: %s\n' % e.strerror)
-            return e.errno
-        else:
-            if stat.S_ISDIR(st.st_mode):
-                shell.curdir = newpath
-                return 0
-            else:
-                print('cd: %s' % 'Not a directory\n')
-                return 1
     else:
-        print('cd without arguments not implemented yet\n')
-        return 1
+        newpath = expanduser('~', shell)
+    try:
+        st = os.stat(newpath)
+    except OSError, e:
+        print('cd: %s\n' % e.strerror)
+        return e.errno
+    else:
+        if stat.S_ISDIR(st.st_mode):
+            shell.curdir = newpath
+            return 0
+        else:
+            print('cd: %s' % 'Not a directory\n')
+            return 1
 
 builtin_commands = {
     'cd': command_cd,
@@ -70,8 +73,12 @@ builtin_commands = {
 def expr_pwd(shell):
     return [shell.curdir]
 
+def expr_home(shell):
+    return [expanduser('~', shell)]
+
 builtin_exprs = {
     'pwd': expr_pwd,
+    'home': expr_home,
     }
 
 if _windows:
