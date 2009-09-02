@@ -141,6 +141,10 @@ if _windows:
                 ctypes.windll.kernel32.CloseHandle(self._hprocess)
                 return self._result
 
+        def run(self):
+            self.spawn()
+            return self.wait()
+
     import UserDict
     # the environment needs to be case-insensitive on Windows, case-sensitive on other platforms
     class EnvironDictionary(UserDict.DictMixin):
@@ -244,6 +248,10 @@ else:
                 self._result = exitcode
                 return exitcode
 
+        def run(self):
+            self.spawn()
+            return self.wait()
+
     EnvironDictionary = dict
 
 class BuiltinCommandInstance(object):
@@ -256,8 +264,10 @@ class BuiltinCommandInstance(object):
         self._stdin = stdin
         self._stdout = stdout
         self._stderr = stderr
+        self._lock = thread.allocate_lock()
+        self._lock.acquire()
 
-    def thread_func(self):
+    def run(self):
         try:
             self._result = self._command_func(self._args, self._shell, self._stdin, self._stdout, self._stderr)
         except:
@@ -265,12 +275,11 @@ class BuiltinCommandInstance(object):
             print('An internal error occurred:\n%s' % traceback.print_exc())
             self._result = 31335
         self._lock.release()
+        return self._result
 
     def spawn(self):
-        self._lock = thread.allocate_lock()
-        self._lock.acquire()
         #FIXME: get stdin, stdout, and stderr from the shell if necessary
-        thread.start_new_thread(self.thread_func, ())
+        thread.start_new_thread(self.run, ())
 
     def poll(self):
         try:
@@ -292,6 +301,8 @@ class DoNothingCommandInstance(object):
     def poll(self):
         return 0
     def wait(self):
+        return 0
+    def run(self):
         return 0
 
 def eval_args(args, shell, stdin, stdout, stderr):
@@ -416,8 +427,7 @@ class Shell(object):
         while cmd is not None:
             code = parse_command(cmd)
             block = code.create_instance(self, None, None, None)
-            block.spawn()
-            block.wait()
+            block.run()
             cmd = self.read_input()
 
     def translate_command(self, cmd):
