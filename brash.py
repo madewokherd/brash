@@ -38,16 +38,6 @@ def expanduser(string, shell):
     # FIXME: os.path uses the current environment, not that of the shell
     return os.path.expanduser(string)
 
-class CommandBlock(object):
-    def spawn(self, shell, stdin, stdout, stderr):
-        raise NotImplemented
-
-    def poll(self):
-        raise NotImplemented
-
-    def wait(self):
-        raise NotImplemented
-
 def command_cd(args, shell, stdin, stdout, stderr):
     if len(args) > 1:
         newpath = os.path.normpath(os.path.join(shell.curdir, args[1]))
@@ -74,10 +64,10 @@ builtin_commands = {
     'cd': command_cd,
     }
 
-def expr_pwd(shell):
+def expr_pwd(shell, stdin, stdout, stderr):
     return [shell.curdir]
 
-def expr_home(shell):
+def expr_home(shell, stdin, stdout, stderr):
     return [expanduser('~', shell)]
 
 builtin_exprs = {
@@ -87,18 +77,20 @@ builtin_exprs = {
 
 if _windows:
     class ArgBlock(CommandBlock):
-        __slots__ = ['_hprocess', '_result', '_args']
+        __slots__ = ['_hprocess', '_result', '_args', '_shell', '_stdin', '_stdout', '_stderr']
 
-        def __init__(self, args):
+        def __init__(self, args, shell, stdin, stdout, stderr):
             self._args = args
+            self._stdin = stdin
+            self._stdout = stdout
+            self._stderr = stderr
 
-        def spawn(self, shell, stdin, stdout, stderr):
-            args = self._parse_and_eval_args()
+        def spawn(self):
             try:
                 self._hprocess
             except AttributeError:
                 import ctypes, process, subprocess
-                cmdline = subprocess.list2cmdline(args)
+                cmdline = subprocess.list2cmdline(self._args)
                 si = process.STARTUPINFO()
                 pi = process.PROCESS_INFORMATION()
                 try:
@@ -179,23 +171,18 @@ if _windows:
         def iteritems(self):
             return self.values.itervalues()
 else:
-    class ArgBlock(CommandBlock):
-        __slots__ = ['_pid', '_result', '_args', '_lock']
+    class ExternalCommandInstance(object):
+        __slots__ = ['_pid', '_result', '_args', '_lock', '_shell', '_stdin', '_stdout', '_stderr']
 
-        def __init__(self, args):
+        def __init__(self, args, shell, stdin, stdout, stderr):
             self._args = args
+            self._shell = shell
+            self._stdin = stdin
+            self._stdout = stdout
+            self._stderr = stderr
 
-        def thread_func(self, command_func, args, shell, stdin, stdout, stderr):
-            try:
-                self._result = command_func(args, shell, stdin, stdout, stderr)
-            except:
-                import traceback
-                print('An internal error occurred:\n%s' % traceback.print_exc())
-                self._result = 31335
-            self._lock.release()
-
-        def spawn(self, shell, stdin, stdout, stderr):
-            args = shell._parse_and_eval_args(self._args)
+        def spawn(self):
+            args = self._args
             if not args:
                 self._pid = None
                 self._result = 0
@@ -203,32 +190,21 @@ else:
             try:
                 self._pid
             except AttributeError:
-                try: # is this a builtin?
-                    command_func = builtin_commands[args[0]]
-                except KeyError: #nope
-                    pass
-                else: #yep
-                    self._pid = None
-                    self._lock = thread.allocate_lock()
-                    self._lock.acquire()
-                    #FIXME: get stdin, stdout, and stderr from the shell if necessary
-                    thread.start_new_thread(self.thread_func, (command_func, args, shell, stdin, stdout, stderr))
-                    return
                 pid = os.fork()
                 if pid == 0:
                     # child process
                     #FIXME: use stdin, stdout, and stderr
                     #FIXME: close any other open fd's
-                    os.chdir(shell.curdir)
+                    os.chdir(self._shell.curdir)
                     try:
                         if os.sep in args[0] or (os.altsep and os.altsep in args[0]):
                             # path specifies a directory
-                            os.execve(args[0], args, shell.environ)
+                            os.execve(args[0], args, self._shell.environ)
                         else:
                             # we need to search PATH
-                            for path in shell.environ.get('PATH', os.defpath).split(os.pathsep):
+                            for path in self._shell.environ.get('PATH', os.defpath).split(os.pathsep):
                                 try:
-                                    os.execve(os.path.join(path, args[0]), args, shell.environ)
+                                    os.execve(os.path.join(path, args[0]), args, self._shell.environ)
                                 except OSError, e:
                                     if e.errno != 2: #2 is no such file or directory
                                         raise
@@ -253,28 +229,172 @@ else:
             try:
                 return self._result
             except AttributeError:
-                if self._pid:
-                    pid, exitcode = os.waitpid(self._pid, os.WNOHANG)
-                    if pid:
-                        self._result = exitcode
-                        return exitcode
-                    else:
-                        return None
+                pid, exitcode = os.waitpid(self._pid, os.WNOHANG)
+                if pid:
+                    self._result = exitcode
+                    return exitcode
+                else:
+                    return None
 
         def wait(self):
             try:
                 return self._result
             except AttributeError:
-                if self._pid:
-                    pid, exitcode = os.waitpid(self._pid, 0)
-                    self._result = exitcode
-                    return exitcode
-                else:
-                    self._lock.acquire()
-                    self._lock.release()
-                    return self._result
+                pid, exitcode = os.waitpid(self._pid, 0)
+                self._result = exitcode
+                return exitcode
 
     EnvironDictionary = dict
+
+class BuiltinCommandInstance(object):
+    __slots__ = ['_command_func', '_result', '_args', '_lock', '_shell', '_stdin', '_stdout', '_stderr']
+
+    def __init__(self, command_func, args, shell, stdin, stdout, stderr):
+        self._shell = shell
+        self._command_func = command_func
+        self._args = args
+        self._stdin = stdin
+        self._stdout = stdout
+        self._stderr = stderr
+
+    def thread_func(self):
+        try:
+            self._result = self._command_func(self._args, self._shell, self._stdin, self._stdout, self._stderr)
+        except:
+            import traceback
+            print('An internal error occurred:\n%s' % traceback.print_exc())
+            self._result = 31335
+        self._lock.release()
+
+    def spawn(self):
+        self._lock = thread.allocate_lock()
+        self._lock.acquire()
+        #FIXME: get stdin, stdout, and stderr from the shell if necessary
+        thread.start_new_thread(self.thread_func, ())
+
+    def poll(self):
+        try:
+            return self._result
+        except AttributeError:
+            return None
+
+    def wait(self):
+        try:
+            return self._result
+        except AttributeError:
+            self._lock.acquire()
+            self._lock.release()
+            return self._result
+
+class DoNothingCommandInstance(object):
+    def spawn(self):
+        pass
+    def poll(self):
+        return 0
+    def wait(self):
+        return 0
+
+def eval_args(args, shell, stdin, stdout, stderr):
+    result = []
+    for arglist in args:
+        if not isinstance(arglist, list):
+            arglist = arglist(shell, stdin, stdout, stderr)
+        if not result or not arglist:
+            result.extend(arglist)
+        else:
+            result[-1] = '%s%s' % (result[-1], arglist[0])
+            result.extend(arglist[1:])
+    return result
+
+class CommandBlock(object):
+    __slots__ = ['args', 'slow']
+
+    def __init__(self, args, slow):
+        self.args = args
+        self.slow = slow
+
+    def create_instance(self, shell, stdin, stdout, stderr):
+        # FIXME: spawn a thread or something if self.slow
+        args = eval_args(self.args, shell, stdin, stdout, stderr)   
+        if not args:
+            return DoNothingCommandInstance()
+        try:
+            command_func = builtin_commands[args[0]]
+        except KeyError:
+            return ExternalCommandInstance(args, shell, stdin, stdout, stderr)
+        else:
+            return BuiltinCommandInstance(command_func, args, shell, stdin, stdout, stderr)
+
+_variable_expr_cache = {}
+
+def get_variable_expr(name):
+    if name in _variable_expr_cache:
+        return _variable_expr_cache[name]
+    else:
+        def variable_expr(shell, stdin, stdout, stderr):
+            try:
+                expr_func = builtin_exprs[name]
+            except KeyError:
+                return ['']
+            return expr_func(shell, stdin, stdout, stderr)
+        return variable_expr
+
+def parse_dollars_expr(string, pos=0):
+    if pos >= len(string):
+        raise SyntaxError("unexpected end of expression")
+    char = string[pos]
+    if char.isspace():
+        raise SyntaxError("unexpected whitespace")
+    elif char == '$':
+        return pos+1, '$'
+    else:
+        expr = [char]
+        pos += 1
+        while pos < len(string) and not string[pos].isspace():
+            expr.append(string[pos])
+            pos += 1
+        return pos, get_variable_expr(''.join(expr))
+
+def parse_command(string, pos=0):
+    arglists = []
+    args = []
+    arg = []
+    got_space = False
+    while pos < len(string):
+        char = string[pos]
+        if char.isspace():
+            if arg:
+                if got_space and arglists and not args:
+                    args.append('')
+                args.append(''.join(arg))
+                arg = []
+            got_space = True
+            pos += 1
+        elif char == '$':
+            pos, expr = parse_dollars_expr(string, pos+1)
+            if isinstance(expr, basestring):
+                arg.append(expr)
+            else:
+                if arg:
+                    args.append(''.join(arg))
+                    arg = []
+                elif got_space:
+                    args.append('')
+                if args:
+                    arglists.append(args)
+                    args = []
+                arglists.append(expr)
+                got_space = False
+        else:
+            arg.append(char)
+            pos += 1
+    if arg:
+        if got_space and arglists and not args:
+            args.append('')
+        args.append(''.join(arg))
+    if args:
+        arglists.append(args)
+    return CommandBlock([x for x in arglists if x != ['']], False)
 
 class Shell(object):
     def __init__(self, curdir=None, environ=None):
@@ -288,68 +408,15 @@ class Shell(object):
     def chdir(self, dirname):
         self.curdir = dirname
 
-    def _parse_and_eval_args(self, string):
-        # this has to go
-        args = []
-        arg = []
-        i = iter(string)
-        while True:
-            try:
-                char = i.next()
-            except StopIteration:
-                break
-            if char.isspace():
-                if arg:
-                    args.append(''.join(arg))
-                    arg = []
-            elif char == '$':
-                try:
-                    nextchar = i.next()
-                except StopIteration:
-                    raise SyntaxError("unexpected end of line")
-                if nextchar == '$':
-                    arg.append('$')
-                elif nextchar.isspace():
-                    raise SyntaxError("unexpected whitespace")
-                else:
-                    expr = [nextchar]
-                    while True:
-                        try:
-                            nextchar = i.next()
-                        except StopIteration:
-                            break
-                        if nextchar.isspace():
-                            break
-                        expr.append(nextchar)
-                    expr = ''.join(expr)
-                    try:
-                        expr_func = builtin_exprs[expr]
-                    except KeyError:
-                        result = []
-                    else:
-                        result = expr_func(self)
-                    if result:
-                        args.append('%s%s' % (''.join(arg), result[0]))
-                        args.extend(result[1:])
-                        arg = []
-                    elif arg:
-                        # because we consumed a space earlier, we still have to clear arg
-                        args.append(''.join(arg))
-                        arg = []
-            else:
-                arg.append(char)
-        if arg:
-            args.append(''.join(arg))
-        return args
-
     def read_input(self):
         return None
 
     def run(self):
         cmd = self.read_input()
         while cmd is not None:
-            block = self.translate_command(cmd)
-            block.spawn(self, None, None, None)
+            code = parse_command(cmd)
+            block = code.create_instance(self, None, None, None)
+            block.spawn()
             block.wait()
             cmd = self.read_input()
 
