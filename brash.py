@@ -305,6 +305,49 @@ class DoNothingCommandInstance(object):
     def run(self):
         return 0
 
+class CommandSequenceInstance(object):
+    __slots__ = ['_blocks', '_result', '_lock', '_shell', '_stdin', '_stdout', '_stderr']
+
+    def __init__(self, blocks, shell, stdin, stdout, stderr):
+        self._shell = shell
+        self._blocks = blocks
+        self._stdin = stdin
+        self._stdout = stdout
+        self._stderr = stderr
+        self._lock = thread.allocate_lock()
+        self._lock.acquire()
+
+    def run(self):
+        try:
+            for block in self._blocks:
+                instance = block.create_instance(self._shell, self._stdin, self._stdout, self._stderr)
+                result = instance.run()
+            self._result = result
+        except:
+            import traceback
+            print('An internal error occurred:\n%s' % traceback.print_exc())
+            self._result = 31335
+        self._lock.release()
+        return self._result
+
+    def spawn(self):
+        #FIXME: get stdin, stdout, and stderr from the shell if necessary
+        thread.start_new_thread(self.run, ())
+
+    def poll(self):
+        try:
+            return self._result
+        except AttributeError:
+            return None
+
+    def wait(self):
+        try:
+            return self._result
+        except AttributeError:
+            self._lock.acquire()
+            self._lock.release()
+            return self._result
+
 def eval_args(args, shell, stdin, stdout, stderr):
     result = []
     for arglist in args:
@@ -336,6 +379,15 @@ class CommandBlock(object):
         else:
             return BuiltinCommandInstance(command_func, args, shell, stdin, stdout, stderr)
 
+class CommandSequenceBlock(object):
+    __slots__ = ['blocks']
+
+    def __init__(self, blocks):
+        self.blocks = blocks
+
+    def create_instance(self, shell, stdin, stdout, stderr):
+        return CommandSequenceInstance(self.blocks, shell, stdin, stdout, stderr)
+
 _variable_expr_cache = {}
 
 def get_variable_expr(name):
@@ -350,6 +402,8 @@ def get_variable_expr(name):
             return expr_func(shell, stdin, stdout, stderr)
         return variable_expr
 
+command_breaking_chars = '\r\n;'
+
 def parse_dollars_expr(string, pos=0):
     if pos >= len(string):
         raise SyntaxError("unexpected end of expression")
@@ -361,7 +415,7 @@ def parse_dollars_expr(string, pos=0):
     else:
         expr = [char]
         pos += 1
-        while pos < len(string) and not string[pos].isspace():
+        while pos < len(string) and not string[pos].isspace() and string[pos] not in command_breaking_chars:
             expr.append(string[pos])
             pos += 1
         return pos, get_variable_expr(''.join(expr))
@@ -371,7 +425,7 @@ def parse_command(string, pos=0):
     args = []
     arg = []
     got_space = False
-    while pos < len(string):
+    while pos < len(string) and string[pos] not in command_breaking_chars:
         char = string[pos]
         if char.isspace():
             if arg:
@@ -405,7 +459,24 @@ def parse_command(string, pos=0):
         args.append(''.join(arg))
     if args:
         arglists.append(args)
-    return CommandBlock([x for x in arglists if x != ['']], False)
+    return pos, CommandBlock([x for x in arglists if x != ['']], False)
+
+def parse_commands(string, pos=0):
+    commands = []
+    while pos < len(string):
+        pos, command = parse_command(string, pos)
+        commands.append(command)
+        if pos < len(string) and string[pos] == ';':
+            pos += 1
+            continue
+        else:
+            break
+    if not commands:
+        return pos, CommandBlock([])
+    elif len(commands) == 1:
+        return pos, commands[0]
+    else:
+        return pos, CommandSequenceBlock(commands)
 
 class Shell(object):
     def __init__(self, curdir=None, environ=None):
@@ -425,7 +496,7 @@ class Shell(object):
     def run(self):
         cmd = self.read_input()
         while cmd is not None:
-            code = parse_command(cmd)
+            code = parse_commands(cmd)[1]
             block = code.create_instance(self, None, None, None)
             block.run()
             cmd = self.read_input()
