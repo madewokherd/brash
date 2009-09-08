@@ -512,7 +512,7 @@ def match_glob(text, glob, wildcards, t=0, g=0):
                 if g == len(glob):
                     return True
                 for i in xrange(t, len(text)):
-                    if text[i] == glob[g] and match_glob(text, glob, i+1, g+1):
+                    if text[i] == glob[g] and match_glob(text, glob, wildcards, i+1, g+1):
                         return True
                 return False
             else:
