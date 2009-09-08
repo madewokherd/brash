@@ -3,35 +3,18 @@ Right, so my eventual goal is to create a new somewhat-sh-like shell with a pyth
 
 The following are special:
 
-if <statement>:
-    <commands>
-elif <statement>:
-    <commands>
-else:
-    <commands>
+if <test-statement> <truepart-statement> [elif <test-statement> <truepart-statement> [...]] [else <falsepart-statement>]
 
-while <statement>:
-    <commands>
-    continue
-    break
-else:
-    <commands>
+while <test-statement> <inner-statement> [else <notbroken-statement>
+(inner-statement may contain continue or break)
 
-func <name>:
-    <commands>
+func <name> <statement>
 
-with <statement>:
-    <commands>
-err:
-    <commands>
+with <statement> <stdout-statement> <stderr-statement>
 (makes it possible to pipe stdout to one thing and stderr to another)
 
-for <name> in <expressions>:
-    <commands>
-    continue
-    break
-else:
-    <commands>
+for <name> in <expressions>; <inner-statement> [else <notbroken-statement]
+(inner-statement may contain continue or break)
 
 spawn <statement>
 
