@@ -46,7 +46,7 @@ def command_cd(args, shell, stdin, stdout, stderr):
     try:
         st = os.stat(newpath)
     except OSError, e:
-        print('cd: %s\n' % e.strerror)
+        stderr.write('cd: %s\n' % e.strerror)
         return e.errno
     else:
         if stat.S_ISDIR(st.st_mode):
@@ -54,10 +54,10 @@ def command_cd(args, shell, stdin, stdout, stderr):
                 shell.chdir(newpath)
                 return 0
             except OSError, e:
-                print('cd: %s\n' % e.strerror)
+                stderr.write('cd: %s\n' % e.strerror)
                 return e.errno
         else:
-            print('cd: %s' % 'Not a directory\n')
+            stderr.write('cd: %s' % 'Not a directory\n')
             return 1
 
 builtin_commands = {
@@ -79,11 +79,12 @@ if _windows:
     class ArgBlock(CommandBlock):
         __slots__ = ['_hprocess', '_result', '_args', '_shell', '_stdin', '_stdout', '_stderr']
 
-        def __init__(self, args, shell, stdin, stdout, stderr):
+        def __init__(self, args, shell, stdin, stdout, stderr, ownfds=()):
             self._args = args
             self._stdin = stdin
             self._stdout = stdout
             self._stderr = stderr
+            self._ownfds = ownfds
 
         def spawn(self):
             try:
@@ -96,6 +97,7 @@ if _windows:
                 try:
                     #FIXME: use PATH and environment from the shell
                     #FIXME: use working dir from the shell
+                    #FIXME: use pipes from the shell
                     process.CreateProcess(
                         None, #application name
                         cmdline, #command line
@@ -175,15 +177,21 @@ if _windows:
         def iteritems(self):
             return self.values.itervalues()
 else:
-    class ExternalCommandInstance(object):
-        __slots__ = ['_pid', '_result', '_args', '_lock', '_shell', '_stdin', '_stdout', '_stderr']
+    try:
+        MAXFD = os.sysconf("SC_OPEN_MAX")
+    except:
+        MAXFD = 256
 
-        def __init__(self, args, shell, stdin, stdout, stderr):
+    class ExternalCommandInstance(object):
+        __slots__ = ['_pid', '_result', '_args', '_lock', '_shell', '_stdin', '_stdout', '_stderr', '_ownfds']
+
+        def __init__(self, args, shell, stdin, stdout, stderr, ownfds=()):
             self._args = args
             self._shell = shell
             self._stdin = stdin
             self._stdout = stdout
             self._stderr = stderr
+            self._ownfds = ownfds
 
         def spawn(self):
             args = self._args
@@ -197,8 +205,34 @@ else:
                 pid = os.fork()
                 if pid == 0:
                     # child process
-                    #FIXME: use stdin, stdout, and stderr
-                    #FIXME: close any other open fd's
+                    # set up streams
+                    if self._stdin.fileno() != 0:
+                        try:
+                            os.close(0)
+                        except:
+                            pass
+                        os.dup2(self._stdin.fileno(), 0)
+                    if self._stdout.fileno() != 1:
+                        try:
+                            os.close(1)
+                        except:
+                            pass
+                        os.dup2(self._stdout.fileno(), 1)
+                    # close any other open fd's
+                    if self._stderr.fileno() != 2:
+                        try:
+                            os.close(2)
+                        except:
+                            pass
+                        os.dup2(self._stderr.fileno(), 2)
+                    try:
+                        os.closerange(3, MAXFD)
+                    except AttributeError:
+                        for i in xrange(3, MAXFD):
+                            try:
+                                os.close(i)
+                            except:
+                                pass
                     os.chdir(self._shell.curdir)
                     try:
                         if os.sep in args[0] or (os.altsep and os.altsep in args[0]):
@@ -213,19 +247,21 @@ else:
                                     if e.errno != 2: #2 is no such file or directory
                                         raise
                             else:
-                                print("%s: %s" % (args[0], e.strerror))
+                                os.write(2, "%s: %s" % (args[0], e.strerror))
                                 os._exit(e.errno)
                     except OSError, e:
-                        print("%s: %s" % (args[0], e.strerror))
+                        os.write(2, "%s: %s" % (args[0], e.strerror))
                         os._exit(e.errno)
                     except:
                         import traceback
-                        traceback.print_exc()
+                        self._stderr.writetraceback.print_exc()
                         os._exit(1)
-                    print("os.execv returned ??!") #shouldn't be possible
+                    os.write(2, "os.execv returned ??!") #shouldn't be possible
                     os._exit(1)
                 else:
                     self._pid = pid
+                    for fd in self._ownfds:
+                        fd.close()
             else:
                 raise error("spawn() has already been called")
 
@@ -254,22 +290,19 @@ else:
 
     EnvironDictionary = dict
 
-class BuiltinCommandInstance(object):
-    __slots__ = ['_command_func', '_result', '_args', '_lock', '_shell', '_stdin', '_stdout', '_stderr']
-
-    def __init__(self, command_func, args, shell, stdin, stdout, stderr):
+class BuiltinActionInstance(object):
+    def __init__(self, shell, stdin, stdout, stderr, ownfds=()):
         self._shell = shell
-        self._command_func = command_func
-        self._args = args
         self._stdin = stdin
         self._stdout = stdout
         self._stderr = stderr
         self._lock = thread.allocate_lock()
         self._lock.acquire()
+        self._ownfds = ownfds
 
     def run(self):
         try:
-            self._result = self._command_func(self._args, self._shell, self._stdin, self._stdout, self._stderr)
+            self._result = self.work()
         except:
             import traceback
             print('An internal error occurred:\n%s' % traceback.print_exc())
@@ -294,6 +327,19 @@ class BuiltinCommandInstance(object):
             self._lock.acquire()
             self._lock.release()
             return self._result
+
+class BuiltinCommandInstance(BuiltinActionInstance):
+    def __init__(self, command_func, args, *rest, **kwargs):
+        BuiltinActionInstance.__init__(self, *rest, **kwargs)
+        self._command_func = command_func
+        self._args = args
+
+    def work(self):
+        try:
+            result = self._command_func(self._args, self._shell, self._stdin, self._stdout, self._stderr)
+        finally:
+            for fd in self._ownfds:
+                fd.close()
 
 class DoNothingCommandInstance(object):
     def spawn(self):
@@ -305,48 +351,20 @@ class DoNothingCommandInstance(object):
     def run(self):
         return 0
 
-class CommandSequenceInstance(object):
-    __slots__ = ['_blocks', '_result', '_lock', '_shell', '_stdin', '_stdout', '_stderr']
-
-    def __init__(self, blocks, shell, stdin, stdout, stderr):
-        self._shell = shell
+class CommandSequenceInstance(BuiltinCommandInstance):
+    def __init__(self, blocks, *args, **kwargs):
+        BuiltinActionInstance.__init__(self, *args, **kwargs)
         self._blocks = blocks
-        self._stdin = stdin
-        self._stdout = stdout
-        self._stderr = stderr
-        self._lock = thread.allocate_lock()
-        self._lock.acquire()
 
-    def run(self):
-        try:
-            for block in self._blocks:
-                instance = block.create_instance(self._shell, self._stdin, self._stdout, self._stderr)
-                result = instance.run()
-            self._result = result
-        except:
-            import traceback
-            print('An internal error occurred:\n%s' % traceback.print_exc())
-            self._result = 31335
-        self._lock.release()
-        return self._result
-
-    def spawn(self):
-        #FIXME: get stdin, stdout, and stderr from the shell if necessary
-        thread.start_new_thread(self.run, ())
-
-    def poll(self):
-        try:
-            return self._result
-        except AttributeError:
-            return None
-
-    def wait(self):
-        try:
-            return self._result
-        except AttributeError:
-            self._lock.acquire()
-            self._lock.release()
-            return self._result
+    def work(self):
+        for n, block in enumerate(self._blocks):
+            if n == len(self._blocks)-1:
+                ownfds = self._ownfds
+            else:
+                ownfds = ()
+            instance = block.create_instance(self._shell, self._stdin, self._stdout, self._stderr, self._ownfds)
+            result = instance.run()
+        return result
 
 def eval_args(args, shell, stdin, stdout, stderr):
     result = []
@@ -367,7 +385,7 @@ class CommandBlock(object):
         self.args = args
         self.slow = slow
 
-    def create_instance(self, shell, stdin, stdout, stderr):
+    def create_instance(self, shell, stdin, stdout, stderr, ownfds=()):
         # FIXME: spawn a thread or something if self.slow
         args = eval_args(self.args, shell, stdin, stdout, stderr)   
         if not args:
@@ -375,9 +393,9 @@ class CommandBlock(object):
         try:
             command_func = builtin_commands[args[0]]
         except KeyError:
-            return ExternalCommandInstance(args, shell, stdin, stdout, stderr)
+            return ExternalCommandInstance(args, shell, stdin, stdout, stderr, ownfds)
         else:
-            return BuiltinCommandInstance(command_func, args, shell, stdin, stdout, stderr)
+            return BuiltinCommandInstance(command_func, args, shell, stdin, stdout, stderr, ownfds)
 
 class CommandSequenceBlock(object):
     __slots__ = ['blocks']
@@ -385,8 +403,8 @@ class CommandSequenceBlock(object):
     def __init__(self, blocks):
         self.blocks = blocks
 
-    def create_instance(self, shell, stdin, stdout, stderr):
-        return CommandSequenceInstance(self.blocks, shell, stdin, stdout, stderr)
+    def create_instance(self, shell, stdin, stdout, stderr, ownfds=()):
+        return CommandSequenceInstance(self.blocks, shell, stdin, stdout, stderr, ownfds)
 
 _variable_expr_cache = {}
 
@@ -497,7 +515,7 @@ class Shell(object):
         cmd = self.read_input()
         while cmd is not None:
             code = parse_commands(cmd)[1]
-            block = code.create_instance(self, None, None, None)
+            block = code.create_instance(self, self.stdin, self.stdout, self.stderr, ())
             block.run()
             cmd = self.read_input()
 
