@@ -254,7 +254,7 @@ else:
                         os._exit(e.errno)
                     except:
                         import traceback
-                        self._stderr.writetraceback.print_exc()
+                        self._stderr.write(traceback.format_exc())
                         os._exit(1)
                     os.write(2, "os.execv returned ??!") #shouldn't be possible
                     os._exit(1)
@@ -425,6 +425,8 @@ class CommandBlock(object):
         # FIXME: spawn a thread or something if self.slow
         args = eval_args(self.args, shell, stdin, stdout, stderr)   
         if not args:
+            for fd in ownfds:
+                fd.close()
             return DoNothingCommandInstance()
         try:
             command_func = builtin_commands[args[0]]
@@ -432,6 +434,12 @@ class CommandBlock(object):
             return ExternalCommandInstance(args, shell, stdin, stdout, stderr, ownfds)
         else:
             return BuiltinCommandInstance(command_func, args, shell, stdin, stdout, stderr, ownfds)
+
+class EmptyBlock(object):
+    def create_instance(self, shell, stdin, stdout, stderr, ownfds=()):
+        for fd in ownfds:
+            fd.close()
+        return DoNothingCommandInstance()
 
 class PipelineBlock(object):
     __slots__ = ['blocks']
@@ -463,6 +471,7 @@ def get_variable_expr(name):
             except KeyError:
                 return ['']
             return expr_func(shell, stdin, stdout, stderr)
+        _variable_expr_cache[name] = variable_expr
         return variable_expr
 
 command_breaking_chars = '\r\n;|'
@@ -484,19 +493,118 @@ def parse_dollars_expr(string, pos=0):
             pos += 1
         return pos, get_variable_expr(''.join(expr))
 
+def match_glob(text, glob, wildcards, t=0, g=0):
+    while g < len(glob):
+        if g in wildcards:
+            star_p = q_cnt = 0
+            while g < len(glob):
+                if glob[g] == '*':
+                    star_p = True
+                elif glob[g] == '?':
+                    q_cnt += 1
+                else:
+                    break
+                g += 1
+            t += q_cnt
+            if t > len(text):
+                return False
+            if star_p:
+                if g == len(glob):
+                    return True
+                for i in xrange(t, len(text)):
+                    if text[i] == glob[g] and match_glob(text, glob, i+1, g+1):
+                        return True
+                return False
+            else:
+                if t == len(text) and g == len(glob):
+                    return True
+        if t == len(text) or g == len(glob) or text[t] != glob[g]:
+            return False
+        t += 1
+        g += 1
+    return t == len(text)
+
+def create_wildcard_expr(string, wildcards):
+    if _windows:
+        if string[1:2] == ':' and string[2:3] in ('/', '\\'):
+            # absolute path starting with a drive
+            parent = string[0:3]
+            pos = 3
+        elif string[0] in ('/', '\\'):
+            parent = string[0]
+            pos = 1
+        else:
+            parent = ''
+            pos = 0
+        string = string.replace('\\', '/')
+    else:
+        if string[0] == '/':
+            parent = '/'
+            pos = 1
+        else:
+            parent = ''
+            pos = 0
+    components = []
+    while pos < len(string):
+        if string[pos] == '/':
+            pos += 1
+            continue
+        end = string.find('/', pos)
+        if end == -1:
+            end = len(string)
+        components.append((string[pos:end], [x-pos for x in wildcards if pos <= x < end]))
+        pos = end+1
+    def wildcard_expr(shell, stdin, stdout, stderr):
+        paths = [parent]
+        for glob, wildcard in components:
+            new_paths = []
+            for path in paths:
+                if wildcard:
+                    try:
+                        for subpath in os.listdir(os.path.join(shell.curdir, path)):
+                            if match_glob(subpath, glob, wildcard):
+                                new_paths.append(os.path.join(path, subpath))
+                    except OSError:
+                        pass
+                else:
+                    newpath = os.path.join(path, glob)
+                    try:
+                        if os.path.exists(os.path.join(shell.curdir, newpath)):
+                            new_paths.append(newpath)
+                    except OSError:
+                        pass
+            paths = new_paths
+            if not paths:
+                break
+        if paths:
+            return paths
+        else:
+            return [string]
+    return wildcard_expr
+
 def parse_command(string, pos=0):
     arglists = []
     args = []
     arg = []
     got_space = False
+    unescaped_wildcards = []
     while pos < len(string) and string[pos] not in command_breaking_chars:
         char = string[pos]
         if char.isspace():
             if arg:
-                if got_space and arglists and not args:
-                    args.append('')
-                args.append(''.join(arg))
+                if unescaped_wildcards:
+                    if got_space and (args or arglists):
+                        args.append('')
+                    if args:
+                        arglists.append(args)
+                        args = []
+                    arglists.append(create_wildcard_expr(''.join(arg), unescaped_wildcards))
+                else:
+                    if got_space and arglists and not args:
+                        args.append('')
+                    args.append(''.join(arg))
                 arg = []
+                unescaped_wildcards = []
             got_space = True
             pos += 1
         elif char == '$':
@@ -514,13 +622,25 @@ def parse_command(string, pos=0):
                     args = []
                 arglists.append(expr)
                 got_space = False
+        elif char in '*?':
+            unescaped_wildcards.append(len(arg))
+            arg.append(char)
+            pos += 1
         else:
             arg.append(char)
             pos += 1
     if arg:
-        if got_space and arglists and not args:
-            args.append('')
-        args.append(''.join(arg))
+        if unescaped_wildcards:
+            if got_space and (args or arglists):
+                args.append('')
+            if args:
+                arglists.append(args)
+                args = []
+            arglists.append(create_wildcard_expr(''.join(arg), unescaped_wildcards))
+        else:
+            if got_space and arglists and not args:
+                args.append('')
+            args.append(''.join(arg))
     if args:
         arglists.append(args)
     return pos, CommandBlock([x for x in arglists if x != ['']], False)
@@ -536,7 +656,7 @@ def parse_pipeline(string, pos=0):
         else:
             break
     if not commands:
-        return pos, CommandBlock([])
+        return pos, EmptyBlock()
     elif len(commands) == 1:
         return pos, commands[0]
     else:
@@ -553,7 +673,7 @@ def parse_commands(string, pos=0):
         else:
             break
     if not commands:
-        return pos, CommandBlock([])
+        return pos, EmptyBlock()
     elif len(commands) == 1:
         return pos, commands[0]
     else:
