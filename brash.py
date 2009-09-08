@@ -351,6 +351,42 @@ class DoNothingCommandInstance(object):
     def run(self):
         return 0
 
+class PipelineInstance(BuiltinCommandInstance):
+    def __init__(self, blocks, *args, **kwargs):
+        BuiltinActionInstance.__init__(self, *args, **kwargs)
+        self._blocks = blocks
+
+    def work(self):
+        instances = []
+        for n, block in enumerate(self._blocks):
+            if n == 0:
+                r = self._stdin
+                _ownfds = []
+                if self._stdin in self._ownfds:
+                    self._ownfds.remove(self._stdin)
+                    _ownfds.append(self._stdin)
+            else:
+                r = next_r
+                _ownfds = [r]
+            if n == len(self._blocks)-1:
+                w = self._stdout
+                if self._stdout in self._ownfds:
+                    self._ownfds.remove(self._stdout)
+                    _ownfds.append(self._stdout)
+            else:
+                next_r, w = os.pipe()
+                next_r = os.fdopen(next_r, 'r', 0)
+                w = os.fdopen(w, 'w', 0)
+                _ownfds.append(w)
+            instance = block.create_instance(self._shell, r, w, self._stderr, _ownfds)
+            instances.append(instance)
+            instance.spawn()
+        for instance in instances:
+            result = instance.wait()
+        for fd in self._ownfds:
+            fd.close()
+        return result
+
 class CommandSequenceInstance(BuiltinCommandInstance):
     def __init__(self, blocks, *args, **kwargs):
         BuiltinActionInstance.__init__(self, *args, **kwargs)
@@ -397,6 +433,15 @@ class CommandBlock(object):
         else:
             return BuiltinCommandInstance(command_func, args, shell, stdin, stdout, stderr, ownfds)
 
+class PipelineBlock(object):
+    __slots__ = ['blocks']
+
+    def __init__(self, blocks):
+        self.blocks = blocks
+
+    def create_instance(self, shell, stdin, stdout, stderr, ownfds=()):
+        return PipelineInstance(self.blocks, shell, stdin, stdout, stderr, ownfds)
+
 class CommandSequenceBlock(object):
     __slots__ = ['blocks']
 
@@ -420,7 +465,8 @@ def get_variable_expr(name):
             return expr_func(shell, stdin, stdout, stderr)
         return variable_expr
 
-command_breaking_chars = '\r\n;'
+command_breaking_chars = '\r\n;|'
+pipeline_breaking_chars = '\r\n;'
 
 def parse_dollars_expr(string, pos=0):
     if pos >= len(string):
@@ -479,10 +525,27 @@ def parse_command(string, pos=0):
         arglists.append(args)
     return pos, CommandBlock([x for x in arglists if x != ['']], False)
 
-def parse_commands(string, pos=0):
+def parse_pipeline(string, pos=0):
     commands = []
     while pos < len(string):
         pos, command = parse_command(string, pos)
+        commands.append(command)
+        if pos < len(string) and string[pos] == '|':
+            pos += 1
+            continue
+        else:
+            break
+    if not commands:
+        return pos, CommandBlock([])
+    elif len(commands) == 1:
+        return pos, commands[0]
+    else:
+        return pos, PipelineBlock(commands)
+
+def parse_commands(string, pos=0):
+    commands = []
+    while pos < len(string):
+        pos, command = parse_pipeline(string, pos)
         commands.append(command)
         if pos < len(string) and string[pos] == ';':
             pos += 1
