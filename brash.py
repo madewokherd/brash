@@ -582,6 +582,12 @@ def create_wildcard_expr(string, wildcards):
             return [string]
     return wildcard_expr
 
+def create_userhome_expr(user):
+    userhome = '~%s' % user
+    def userhome_expr(shell, stdin, stdout, stderr):
+        return [expanduser(userhome, shell)]
+    return userhome_expr
+
 def parse_command(string, pos=0):
     arglists = []
     args = []
@@ -615,6 +621,7 @@ def parse_command(string, pos=0):
                 if arg:
                     args.append(''.join(arg))
                     arg = []
+                    unescaped_wildcards = []
                 elif got_space:
                     args.append('')
                 if args:
@@ -622,6 +629,26 @@ def parse_command(string, pos=0):
                     args = []
                 arglists.append(expr)
                 got_space = False
+        elif char == '~' and not arg:
+            pos += 1
+            username = []
+            while pos < len(string) and string[pos].isalnum():
+                username.append(string[pos])
+                pos += 1
+            if arg:
+                args.append(''.join(arg))
+                arg = []
+                unescaped_wildcards = []
+            elif got_space:
+                args.append('')
+            if args:
+                arglists.append(args)
+                args = []
+            if username:
+                arglists.append(create_userhome_expr(''.join(username)))
+            else:
+                arglists.append(get_variable_expr('home'))
+            got_space = False
         elif char in '*?':
             unescaped_wildcards.append(len(arg))
             arg.append(char)
